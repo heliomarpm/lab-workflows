@@ -92,8 +92,9 @@ jobs:
       - name: Detect stack
         id: detect
         run: |
-          chmod +x ./scripts/shared/detect-stack.sh
-          ./scripts/shared/detect-stack.sh "${{ inputs.project_path }}" "${{ inputs.stack }}"
+          SCRIPT="${{ env.REUSABLE_PATH }}/scripts/shared/detect-stack.sh"
+          chmod +x $SCRIPT
+          $SCRIPT "${{ inputs.project_path }}" "${{ inputs.stack }}"
 
 # ──────────────────────────────────────────────
 # JOB 2 — TESTS & COVERAGE
