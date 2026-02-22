@@ -110,3 +110,10 @@ abort() {
   log_error "$*"
   exit 1
 }
+
+ls_files() {
+  log_debug "📂 Current directory:"
+  pwd
+  log_debug "📄 Files in root:"
+  ls -la
+}

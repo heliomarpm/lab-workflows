@@ -333,6 +333,11 @@ jobs:
         with:
           node-version: 'lts/*'
 
+      - name: 👀 Files in workspace
+        # working-directory: ${{ steps.path.outputs.value }}
+        run: |
+          ls_files
+
       - name: Validate commits
         id: validate
         env:
