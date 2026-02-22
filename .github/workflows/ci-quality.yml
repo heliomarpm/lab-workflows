@@ -348,7 +348,7 @@ jobs:
             TO_SHA="${{ github.event.pull_request.head.sha }}"
           fi
 
-          node ./scripts/shared/validate-commits.mjs "$FROM_SHA" "$TO_SHA"
+          node ./__reusable_files__/scripts/shared/validate-commits.mjs "$FROM_SHA" "$TO_SHA"
 
           # Merge back into real GITHUB_OUTPUT
           cat "${{ runner.temp }}/validate-commits-gha-output.txt" >> "$GITHUB_OUTPUT" || true
