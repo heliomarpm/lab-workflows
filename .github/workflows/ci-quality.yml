@@ -1,0 +1,524 @@
+name: CI - Quality Assurance
+
+on:
+  workflow_call:
+    inputs:
+      stack:
+        description: 'Stack the project. (node | php | dotnet | python | go | auto)'
+        required: false
+        type: string
+        default: "auto"
+      project_path:
+        description: 'Project path source code'
+        required: false
+        type: string
+        default: "."
+      project_private:
+        description: 'Source repository is private. GH_TOKEN will be required if private.'
+        required: false
+        type: boolean
+        default: false
+      coverage_base_branch:
+        description: 'Base branch for comparative coverage (decrease mode)'
+        required: false
+        type: string
+        default: "main"
+      coverage_command:
+        description: 'Custom command to calculate coverage percentage'
+        required: false
+        type: string
+      coverage_min:
+        description: 'Minimum coverage percentage (0-100)'
+        type: number
+        required: false
+        default: 80
+      coverage_strict_mode:
+        description: 'Coverage enforcement mode (info | block | decrease)'
+        type: string
+        required: false
+        default: "info"
+      commit_validation_mode:
+        description: 'Commit validation mode (info | block)'
+        type: string
+        required: false
+        default: "info"
+
+    secrets:
+      GH_TOKEN:
+        description: 'GitHub token for private repositories'
+        required: false
+
+    outputs:
+      contract:
+        description: 'JSON contract with all validation results'
+        value: ${{ jobs.publish-contract.outputs.contract }}
+
+# ──────────────────────────────────────────────
+# JOB 1 — CHECKOUT + DETECT STACK
+# Single checkout shared across all validation logic via cache.
+# ──────────────────────────────────────────────
+jobs:
+  setup:
+    name: 🔧 Setup & Detect Stack
+    runs-on: ubuntu-latest
+    outputs:
+      stack: ${{ steps.detect.outputs.stack }}
+      stack_source: ${{ steps.detect.outputs.stack_source }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ inputs.project_private && secrets.GH_TOKEN || github.token }}
+
+      - name: Cache repository
+        uses: actions/cache@v4
+        with:
+          path: .
+          key: repo-${{ github.sha }}
+
+      - name: Detect stack
+        id: detect
+        run: |
+          chmod +x ./scripts/shared/detect-stack.sh
+          ./scripts/shared/detect-stack.sh "${{ inputs.project_path }}" "${{ inputs.stack }}"
+
+# ──────────────────────────────────────────────
+# JOB 2 — TESTS & COVERAGE
+# ──────────────────────────────────────────────
+  tests-and-coverage:
+    name: 🧪 Tests & Coverage (${{ needs.setup.outputs.stack }})
+    runs-on: ubuntu-latest
+    needs: setup
+    outputs:
+      has_tests:        ${{ steps.run-tests.outputs.has_tests }}
+      tests_passed:     ${{ steps.run-tests.outputs.tests_passed }}
+      coverage_pct:     ${{ steps.run-coverage.outputs.coverage_pct }}
+      coverage_tool:    ${{ steps.run-coverage.outputs.coverage_tool }}
+      coverage_status:  ${{ steps.evaluate.outputs.status }}
+      coverage_message: ${{ steps.evaluate.outputs.message }}
+      base_coverage_pct: ${{ steps.base-coverage.outputs.base_coverage_pct }}
+
+    steps:
+      - name: Restore repository cache
+        uses: actions/cache@v4
+        with:
+          path: .
+          key: repo-${{ github.sha }}
+
+      - name: Make scripts executable
+        run: find ./scripts -name "*.sh" -exec chmod +x {} \;
+
+      # ── Setup runtimes ─────────────────────────────────────────────────────
+      - name: Setup Node.js
+        if: needs.setup.outputs.stack == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+          cache-dependency-path: '${{ inputs.project_path }}/package-lock.json'
+
+      - name: Setup PHP
+        if: needs.setup.outputs.stack == 'php'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: 'latest'
+          coverage: xdebug
+
+      - name: Setup .NET
+        if: needs.setup.outputs.stack == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 'latest'
+
+      - name: Setup Python
+        if: needs.setup.outputs.stack == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          cache: 'pip'
+
+      - name: Setup Go
+        if: needs.setup.outputs.stack == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+
+      # ── Run tests via stack plugin ─────────────────────────────────────────
+      - name: Run tests
+        id: run-tests
+        if: needs.setup.outputs.stack != 'unknown'
+        env:
+          QA_OUTPUT_DIR: /tmp
+        run: |
+          STACK="${{ needs.setup.outputs.stack }}"
+          SCRIPT="./scripts/plugins/${STACK}/test.sh"
+
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::warning title=No Test Plugin::No test plugin found for stack '${STACK}'. Skipping."
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "tests_passed=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          "$SCRIPT" "${{ inputs.project_path }}"
+
+      # ── Run coverage via stack plugin ──────────────────────────────────────
+      - name: Run coverage
+        id: run-coverage
+        if: >
+          needs.setup.outputs.stack != 'unknown' &&
+          steps.run-tests.outputs.has_tests == 'true' &&
+          steps.run-tests.outputs.tests_passed == 'true'
+        env:
+          QA_OUTPUT_DIR: /tmp
+          COVERAGE_CMD: ${{ inputs.coverage_command }}
+        run: |
+          STACK="${{ needs.setup.outputs.stack }}"
+          SCRIPT="./scripts/plugins/${STACK}/coverage.sh"
+
+          if [ ! -f "$SCRIPT" ]; then
+            echo "::warning title=No Coverage Plugin::No coverage plugin found for stack '${STACK}'. Skipping."
+            echo "coverage_pct=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          "$SCRIPT" "${{ inputs.project_path }}"
+
+      # ── Base branch coverage (decrease mode) ──────────────────────────────
+      - name: Fetch base branch coverage artifact
+        id: base-coverage-lookup
+        if: inputs.coverage_strict_mode == 'decrease' && steps.run-tests.outputs.has_tests == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ inputs.project_private && secrets.GH_TOKEN || github.token }}
+          script: |
+            const branch = '${{ inputs.coverage_base_branch }}';
+            const artifactName = `quality-contract-${branch.replace(/\//g, '-')}`;
+            try {
+              const { data } = await github.rest.actions.listArtifactsForRepo({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                name:  artifactName,
+                per_page: 1
+              });
+              if (data.total_count === 0) {
+                core.setOutput('found', 'false');
+                core.warning(`No artifact found for base branch '${branch}'. Skipping decrease comparison.`);
+              } else {
+                core.setOutput('found', 'true');
+                core.setOutput('artifact_name', artifactName);
+              }
+            } catch (err) {
+              core.setOutput('found', 'false');
+              core.warning(`Artifact lookup failed: ${err.message}`);
+            }
+
+      - name: Download base coverage artifact
+        if: >
+          inputs.coverage_strict_mode == 'decrease' &&
+          steps.base-coverage-lookup.outputs.found == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.base-coverage-lookup.outputs.artifact_name }}
+          path: /tmp/base-contract
+        continue-on-error: true
+
+      - name: Read base coverage percentage
+        id: base-coverage
+        if: >
+          inputs.coverage_strict_mode == 'decrease' &&
+          steps.base-coverage-lookup.outputs.found == 'true'
+        run: |
+          CONTRACT="/tmp/base-contract/contract.json"
+          if [ -f "$CONTRACT" ]; then
+            BASE_PCT=$(python3 -c "import json; d=json.load(open('$CONTRACT')); print(d.get('coverage',{}).get('percentage', 0))")
+            echo "base_coverage_pct=$BASE_PCT" >> "$GITHUB_OUTPUT"
+            echo "📊 Base branch coverage: ${BASE_PCT}%"
+          else
+            echo "base_coverage_pct=" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Base Coverage::Artifact downloaded but contract.json not found."
+          fi
+
+      # ── Evaluate coverage result ───────────────────────────────────────────
+      - name: Evaluate coverage
+        id: evaluate
+        env:
+          MODE:             ${{ inputs.coverage_strict_mode }}
+          COVERAGE_PCT:     ${{ steps.run-coverage.outputs.coverage_pct }}
+          BASE_COVERAGE_PCT: ${{ steps.base-coverage.outputs.base_coverage_pct }}
+          COVERAGE_MIN:     ${{ inputs.coverage_min }}
+        run: |
+          STATUS="pass"
+          MESSAGE=""
+          PCT="${COVERAGE_PCT:-0}"
+          BASE="${BASE_COVERAGE_PCT:-}"
+          MIN="${COVERAGE_MIN:-80}"
+
+          case "$MODE" in
+            block)
+              if python3 -c "exit(0 if float('$PCT') < float('$MIN') else 1)"; then
+                STATUS="fail"
+                MESSAGE="Coverage ${PCT}% is below the minimum required ${MIN}%."
+                echo "::error title=Coverage Below Minimum::${MESSAGE}"
+              else
+                MESSAGE="Coverage ${PCT}% meets the minimum required ${MIN}%."
+              fi
+              ;;
+            decrease)
+              if [ -z "$BASE" ]; then
+                STATUS="skip"
+                MESSAGE="No base branch artifact found — decrease comparison skipped (treated as info)."
+                echo "::notice title=Coverage Decrease::${MESSAGE}"
+              elif python3 -c "exit(0 if float('$PCT') < float('$BASE') else 1)"; then
+                STATUS="fail"
+                MESSAGE="Coverage decreased: ${BASE}% (base) → ${PCT}% (current)."
+                echo "::error title=Coverage Decreased::${MESSAGE}"
+              else
+                MESSAGE="Coverage maintained or improved: ${BASE}% → ${PCT}%."
+              fi
+              ;;
+            *)
+              MESSAGE="Coverage: ${PCT}% (info mode — no enforcement)."
+              echo "::notice title=Coverage::${MESSAGE}"
+              ;;
+          esac
+
+          echo "status=$STATUS"   >> "$GITHUB_OUTPUT"
+          echo "message=$MESSAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Fail pipeline on coverage
+        if: steps.evaluate.outputs.status == 'fail'
+        run: exit 1
+
+# ──────────────────────────────────────────────
+# JOB 3 — CONVENTIONAL COMMITS
+# ──────────────────────────────────────────────
+  conventional-commits:
+    name: 📝 Conventional Commits
+    runs-on: ubuntu-latest
+    needs: setup
+    outputs:
+      commits_valid:   ${{ steps.validate.outputs.commits_valid }}
+      total_count:     ${{ steps.validate.outputs.total_count }}
+      invalid_count:   ${{ steps.validate.outputs.invalid_count }}
+      output_file:     ${{ steps.validate.outputs.output_file }}
+
+    steps:
+      - name: Restore repository cache
+        uses: actions/cache@v4
+        with:
+          path: .
+          key: repo-${{ github.sha }}
+
+      - name: Setup Node.js (for validate-commits.mjs)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Validate commits
+        id: validate
+        env:
+          BASE_BRANCH:  ${{ inputs.coverage_base_branch }}
+          QA_OUTPUT_DIR: /tmp
+          GITHUB_OUTPUT: ${{ runner.temp }}/validate-commits-gha-output.txt
+        run: |
+          FROM_SHA=""
+          TO_SHA="HEAD"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            FROM_SHA="${{ github.event.pull_request.base.sha }}"
+            TO_SHA="${{ github.event.pull_request.head.sha }}"
+          fi
+
+          node ./scripts/shared/validate-commits.mjs "$FROM_SHA" "$TO_SHA"
+
+          # Merge back into real GITHUB_OUTPUT
+          cat "${{ runner.temp }}/validate-commits-gha-output.txt" >> "$GITHUB_OUTPUT" || true
+
+      - name: Write invalid commits summary
+        if: steps.validate.outputs.commits_valid == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const template = fs.readFileSync('.github/templates/summary-conventional-commits.md', 'utf8');
+            const outputJson = JSON.parse(fs.readFileSync('/tmp/qa-validate-commits-output.json', 'utf8'));
+
+            const invalidList = outputJson.results
+              .filter(r => !r.valid)
+              .map(r => `${r.shortSha}: ${r.message}\n  → ${r.errors.join(', ')}`)
+              .join('\n');
+
+            const rendered = template
+              .replace('{{INVALID_COMMITS_LIST}}', invalidList || '—')
+              .replace('{{INVALID_COMMITS_COUNT}}', String(outputJson.invalid_count));
+
+            await core.summary.addRaw(rendered).write();
+
+      - name: Fail pipeline on invalid commits
+        if: >
+          steps.validate.outputs.commits_valid == 'false' &&
+          inputs.commit_validation_mode == 'block'
+        run: |
+          echo "::error title=Conventional Commits Failed::${{ steps.validate.outputs.invalid_count }} commit(s) do not follow Conventional Commits. See Summary for details and fix instructions."
+          exit 1
+
+# ──────────────────────────────────────────────
+# JOB 4 — PUBLISH CONTRACT + SUMMARY
+# ──────────────────────────────────────────────
+  publish-contract:
+    name: 📦 Publish Contract & Summary
+    runs-on: ubuntu-latest
+    needs:
+      - setup
+      - tests-and-coverage
+      - conventional-commits
+    if: always()
+    outputs:
+      contract: ${{ steps.build.outputs.contract }}
+
+    steps:
+      - name: Restore repository cache
+        uses: actions/cache@v4
+        with:
+          path: .
+          key: repo-${{ github.sha }}
+
+      - name: Build normalized contract
+        id: build
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const contract = {
+              schema_version: "1.0.0",
+              generated_at:   new Date().toISOString(),
+              run: {
+                id:         context.runId,
+                number:     context.runNumber,
+                ref:        context.ref,
+                sha:        context.sha,
+                actor:      context.actor,
+                event:      context.eventName,
+                repository: `${context.repo.owner}/${context.repo.repo}`
+              },
+              stack: {
+                detected: '${{ needs.setup.outputs.stack }}',
+                source:   '${{ needs.setup.outputs.stack_source }}'
+              },
+              tests: {
+                found:  '${{ needs.tests-and-coverage.outputs.has_tests }}' === 'true',
+                passed: '${{ needs.tests-and-coverage.outputs.tests_passed }}' === 'true' ? true
+                      : '${{ needs.tests-and-coverage.outputs.tests_passed }}' === 'false' ? false
+                      : null
+              },
+              coverage: {
+                percentage:      parseFloat('${{ needs.tests-and-coverage.outputs.coverage_pct }}' || '0'),
+                base_percentage: parseFloat('${{ needs.tests-and-coverage.outputs.base_coverage_pct }}' || '0') || null,
+                minimum:         ${{ inputs.coverage_min }},
+                tool:            '${{ needs.tests-and-coverage.outputs.coverage_tool }}' || null,
+                mode:            '${{ inputs.coverage_strict_mode }}',
+                status:          '${{ needs.tests-and-coverage.outputs.coverage_status }}' || 'skip',
+                message:         `${{ needs.tests-and-coverage.outputs.coverage_message }}`
+              },
+              commits: {
+                valid:         '${{ needs.conventional-commits.outputs.commits_valid }}' === 'true',
+                total_count:   parseInt('${{ needs.conventional-commits.outputs.total_count }}' || '0'),
+                invalid_count: parseInt('${{ needs.conventional-commits.outputs.invalid_count }}' || '0'),
+                mode:          '${{ inputs.commit_validation_mode }}'
+              },
+              overall_status: (
+                '${{ needs.tests-and-coverage.outputs.coverage_status }}' === 'fail' ||
+                ('${{ needs.conventional-commits.outputs.commits_valid }}' === 'false' && '${{ inputs.commit_validation_mode }}' === 'block') ||
+                ('${{ needs.tests-and-coverage.outputs.has_tests }}' === 'true' && '${{ needs.tests-and-coverage.outputs.tests_passed }}' === 'false')
+              ) ? 'fail' : 'pass'
+            };
+
+            core.setOutput('contract', JSON.stringify(contract, null, 2));
+            return contract;
+
+      - name: Save contract to file
+        run: |
+          mkdir -p /tmp/contract
+          cat > /tmp/contract/contract.json << 'CONTRACTEOF'
+          ${{ steps.build.outputs.contract }}
+          CONTRACTEOF
+
+      - name: Set artifact name
+        id: artifact-name
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          SAFE_BRANCH="${BRANCH//\//-}"
+          echo "name=quality-contract-${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload contract artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact-name.outputs.name }}
+          path: /tmp/contract/contract.json
+          retention-days: 90
+          overwrite: true
+
+      - name: Write GitHub Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs       = require('fs');
+            const contract = JSON.parse(`${{ steps.build.outputs.contract }}`);
+
+            const icon   = v  => v === true ? '✅' : v === false ? '❌' : '—';
+            const pct    = v  => v !== null && v !== undefined ? `${v}%` : '—';
+            const status = s  => s === 'pass'  ? '🟢 **PASSED**'
+                               : s === 'fail'  ? '🔴 **FAILED**'
+                               : s === 'skip'  ? 'ℹ️ Skipped'
+                               :                 'ℹ️ Info';
+
+            const coverageStatusIcon = contract.coverage.status === 'pass'  ? '✅ Pass'
+                                     : contract.coverage.status === 'fail'  ? '❌ Fail'
+                                     : contract.coverage.status === 'skip'  ? 'ℹ️ Skip'
+                                     :                                        'ℹ️ Info';
+
+            // Load and render template
+            let template = fs.readFileSync('.github/templates/summary-quality.md', 'utf8');
+
+            const invalidCommitsJson = JSON.parse(
+              fs.readFileSync('/tmp/qa-validate-commits-output.json', 'utf8').trim()
+            );
+            const invalidCommitsSection = invalidCommitsJson.invalid_count > 0
+              ? `### ❌ Invalid Commits\n\`\`\`\n${
+                  invalidCommitsJson.results
+                    .filter(r => !r.valid)
+                    .map(r => `${r.shortSha}: ${r.message}\n  → ${r.errors.join(', ')}`)
+                    .join('\n')
+                }\n\`\`\``
+              : '_All commits are valid._';
+
+            template = template
+              .replace('{{RUN_NUMBER}}',            String(contract.run.number))
+              .replace('{{REPOSITORY}}',            contract.run.repository)
+              .replace('{{RUN_ID}}',                String(contract.run.id))
+              .replace('{{REF}}',                   contract.run.ref)
+              .replace('{{ACTOR}}',                 contract.run.actor)
+              .replace('{{OVERALL_STATUS_BADGE}}',  status(contract.overall_status))
+              .replace('{{STACK}}',                 contract.stack.detected)
+              .replace('{{STACK_SOURCE}}',          contract.stack.source)
+              .replace('{{TESTS_FOUND_ICON}}',      icon(contract.tests.found))
+              .replace('{{TESTS_PASSED_ICON}}',     icon(contract.tests.passed))
+              .replace('{{COVERAGE_PCT}}',          pct(contract.coverage.percentage))
+              .replace('{{BASE_COVERAGE_PCT}}',     pct(contract.coverage.base_percentage))
+              .replace('{{COVERAGE_MIN}}',          String(contract.coverage.minimum))
+              .replace('{{COVERAGE_MODE}}',         contract.coverage.mode)
+              .replace('{{COVERAGE_STATUS_ICON}}',  coverageStatusIcon)
+              .replace('{{COVERAGE_STATUS_LABEL}}', contract.coverage.status)
+              .replace('{{COVERAGE_MESSAGE}}',      contract.coverage.message || '—')
+              .replace('{{COMMITS_VALID_ICON}}',    icon(contract.commits.valid))
+              .replace('{{COMMITS_TOTAL}}',         String(contract.commits.total_count))
+              .replace('{{COMMITS_INVALID_COUNT}}', String(contract.commits.invalid_count))
+              .replace('{{COMMITS_MODE}}',          contract.commits.mode)
+              .replace('{{INVALID_COMMITS_SECTION}}', invalidCommitsSection)
+              .replace('{{ARTIFACT_NAME}}',         '${{ steps.artifact-name.outputs.name }}')
+              .replace('{{CONTRACT_JSON}}',         JSON.stringify(contract, null, 2));
+
+            await core.summary.addRaw(template).write();
