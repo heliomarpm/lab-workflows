@@ -116,11 +116,11 @@ jobs:
       - name: Restore repository cache
         uses: actions/cache@v4
         with:
-          path: .
+          path: ${{ github.workspace }}
           key: repo-${{ github.sha }}
 
       - name: Make scripts executable
-        run: find ./scripts -name "*.sh" -exec chmod +x {} \;
+        run: find ./__reusable_files__/scripts -name "*.sh" -exec chmod +x {} \;
 
       # ── Setup runtimes ─────────────────────────────────────────────────────
       - name: Setup Node.js
