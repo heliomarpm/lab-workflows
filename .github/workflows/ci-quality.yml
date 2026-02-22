@@ -336,7 +336,10 @@ jobs:
       - name: 👀 Files in workspace
         # working-directory: ${{ steps.path.outputs.value }}
         run: |
-          ls_files
+          echo "📂 Current directory:"
+          pwd
+          echo "📄 Files in root:"
+          ls -la
 
       - name: Validate commits
         id: validate
