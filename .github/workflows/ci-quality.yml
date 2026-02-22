@@ -325,6 +325,9 @@ jobs:
           path: .
           key: repo-${{ github.sha }}
 
+      - name: Make scripts executable
+        run: find ./__reusable_files__/scripts -name "*.sh" -exec chmod +x {} \;
+
       - name: Setup Node.js (for validate-commits.mjs)
         uses: actions/setup-node@v4
         with:
@@ -398,6 +401,9 @@ jobs:
         with:
           path: .
           key: repo-${{ github.sha }}
+
+      - name: Make scripts executable
+        run: find ./__reusable_files__/scripts -name "*.sh" -exec chmod +x {} \;
 
       - name: Build normalized contract
         id: build
