@@ -61,16 +61,27 @@ jobs:
   setup:
     name: 🔧 Setup & Detect Stack
     runs-on: ubuntu-latest
+    env:
+      REUSABLE_PATH: ${{ github.workspace }}/__reusable_files__
+
     outputs:
       stack: ${{ steps.detect.outputs.stack }}
       stack_source: ${{ steps.detect.outputs.stack_source }}
 
     steps:
-      - name: Checkout
+      - name: 📌 Checkout consumer repository
+        uses: actions/checkout@v4
+        with: 
+          fetch-depth: 0
+          token: ${{ inputs.project_private && secrets.GH_TOKEN || github.token }}
+
+      - name: 📌 Checkout reusable repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ inputs.project_private && secrets.GH_TOKEN || github.token }}
+          repository: heliomarpm/actions-flow
+          # ref: main # ${{ github.ref }}
+          path: ${{ env.REUSABLE_PATH }}
 
       - name: Cache repository
         uses: actions/cache@v4
