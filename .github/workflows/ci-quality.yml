@@ -86,7 +86,7 @@ jobs:
       - name: Cache repository
         uses: actions/cache@v4
         with:
-          path: .
+          path: ${{ github.workspace }}
           key: repo-${{ github.sha }}
 
       - name: Detect stack
