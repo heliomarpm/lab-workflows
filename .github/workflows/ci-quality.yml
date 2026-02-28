@@ -13,11 +13,7 @@ on:
         required: false
         type: string
         default: "."
-      project_private:
-        description: 'Source repository is private. GH_TOKEN will be required if private.'
-        required: false
-        type: boolean
-        default: false
+
       coverage_base_branch:
         description: 'Base branch for comparative coverage (decrease mode)'
         required: false
@@ -37,6 +33,7 @@ on:
         type: string
         required: false
         default: "info"
+
       commit_validation_mode:
         description: 'Commit validation mode (info | block)'
         type: string
@@ -53,15 +50,24 @@ on:
         description: 'JSON contract with all validation results'
         value: ${{ jobs.publish-contract.outputs.contract }}
 
-# ──────────────────────────────────────────────
-# JOB 1 — CHECKOUT + DETECT STACK
-# Single checkout shared across all validation logic via cache.
-# ──────────────────────────────────────────────
+# concurrency:
+#   group: ci-quality-${{ github.ref }}
+#   cancel-in-progress: true
+permissions:
+  contents: write       # → permite criar e atualizar tags, commits e pushes no repositório.
+  checks: write         # → permite criar e atualizar check run
+
+
 jobs:
+  # ──────────────────────────────────────────────
+  # JOB 1 — CHECKOUT + DETECT STACK
+  # Single checkout shared across all validation logic via cache.
+  # ──────────────────────────────────────────────
   setup:
     name: 🔧 Setup & Detect Stack
     runs-on: ubuntu-latest
     env:
+      BASH_ENV: ${{ github.workspace }}/__reusable_files__/scripts/shared/shell-helpers.sh
       REUSABLE_PATH: ${{ github.workspace }}/__reusable_files__
 
     outputs:
@@ -73,7 +79,7 @@ jobs:
         uses: actions/checkout@v4
         with: 
           fetch-depth: 0
-          token: ${{ inputs.project_private && secrets.GH_TOKEN || github.token }}
+          token: ${{ secrets.GH_TOKEN || github.token }}
 
       - name: 📌 Checkout reusable repository
         uses: actions/checkout@v4
@@ -89,6 +95,13 @@ jobs:
           path: .
           key: repo-${{ github.sha }}
 
+      - name: Resolve project path
+        id: path
+        run: |
+          PROJECT_PATH="$(resolve_project_path '${{ inputs.project_path }}')"
+          log "🔹 Using project path: $PROJECT_PATH"
+          echo "value=$PROJECT_PATH" >> "$GITHUB_OUTPUT"
+
       - name: Detect stack
         id: detect
         run: |
@@ -96,9 +109,9 @@ jobs:
           chmod +x $SCRIPT
           $SCRIPT "${{ inputs.project_path }}" "${{ inputs.stack }}"
 
-# ──────────────────────────────────────────────
-# JOB 2 — TESTS & COVERAGE
-# ──────────────────────────────────────────────
+  # ──────────────────────────────────────────────
+  # JOB 2 — TESTS & COVERAGE
+  # ──────────────────────────────────────────────
   tests-and-coverage:
     name: 🧪 Tests & Coverage (${{ needs.setup.outputs.stack }})
     runs-on: ubuntu-latest
@@ -305,9 +318,9 @@ jobs:
         if: steps.evaluate.outputs.status == 'fail'
         run: exit 1
 
-# ──────────────────────────────────────────────
-# JOB 3 — CONVENTIONAL COMMITS
-# ──────────────────────────────────────────────
+  # ──────────────────────────────────────────────
+  # JOB 3 — CONVENTIONAL COMMITS
+  # ──────────────────────────────────────────────
   conventional-commits:
     name: 📝 Conventional Commits
     runs-on: ubuntu-latest
@@ -389,9 +402,9 @@ jobs:
           echo "::error title=Conventional Commits Failed::${{ steps.validate.outputs.invalid_count }} commit(s) do not follow Conventional Commits. See Summary for details and fix instructions."
           exit 1
 
-# ──────────────────────────────────────────────
-# JOB 4 — PUBLISH CONTRACT + SUMMARY
-# ──────────────────────────────────────────────
+  # ──────────────────────────────────────────────
+  # JOB 4 — PUBLISH CONTRACT + SUMMARY
+  # ──────────────────────────────────────────────
   publish-contract:
     name: 📦 Publish Contract & Summary
     runs-on: ubuntu-latest
