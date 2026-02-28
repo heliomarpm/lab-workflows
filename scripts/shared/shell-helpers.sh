@@ -117,3 +117,31 @@ ls_files() {
   log_debug "📄 Files in root:"
   ls -la
 }
+
+resolve_project_path() {
+  local raw="$1"
+  local workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE not set}"
+
+  raw="${raw:-.}"
+  raw="${raw#./}"
+  raw="${raw#/}"
+  raw="${raw%/}"
+
+  local resolved
+  if [[ -z "$raw" || "$raw" == "." ]]; then
+    resolved="$workspace"
+    raw=""
+  else
+    resolved="$workspace/$raw"
+    raw+="/"
+  fi
+
+  if [[ ! -d "$resolved" ]]; then
+    # fail "❌ Project path does not exist: $resolved" 
+    log_error "❌ Project path does not exist: $resolved"
+    # echo "❌ Project path does not exist: $resolved" >&2
+    # return 1
+  fi
+
+  echo "$resolved"
+}
