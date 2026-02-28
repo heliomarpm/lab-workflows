@@ -21,6 +21,7 @@ else
 fi
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+log() { echo "→ $*" >&2; }
 log_info()    { echo -e "${CLR_CYAN}ℹ ${CLR_RESET}${*}"; }
 log_success() { echo -e "${CLR_GREEN}✅ ${CLR_RESET}${*}"; }
 log_warn()    { echo -e "${CLR_YELLOW}⚠️  ${CLR_RESET}${*}"; }

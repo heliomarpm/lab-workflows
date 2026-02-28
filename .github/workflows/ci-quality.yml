@@ -85,7 +85,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          repository: heliomarpm/actions-flow
+          repository: heliomarpm/lab-workflows
           # ref: main # ${{ github.ref }}
           path: ${{ env.REUSABLE_PATH }}
 
@@ -102,12 +102,17 @@ jobs:
           log "🔹 Using project path: $PROJECT_PATH"
           echo "value=$PROJECT_PATH" >> "$GITHUB_OUTPUT"
 
+      - name: 👀 Files in workspace
+        working-directory: ${{ steps.path.outputs.value }}
+        run: |
+          ls_files
+
       - name: Detect stack
         id: detect
         run: |
           SCRIPT="${{ env.REUSABLE_PATH }}/scripts/shared/detect-stack.sh"
           chmod +x $SCRIPT
-          $SCRIPT "${{ inputs.project_path }}" "${{ inputs.stack }}"
+          $SCRIPT "${{ steps.path.outputs.value }}" "${{ inputs.stack }}"
 
   # ──────────────────────────────────────────────
   # JOB 2 — TESTS & COVERAGE
