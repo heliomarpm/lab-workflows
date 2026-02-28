@@ -95,14 +95,18 @@ jobs:
           path: .
           key: repo-${{ github.sha }}
 
-      - name: Resolve project path
+      - name: 👀 Files in workspace      
+        run: |
+          ls_files
+
+      - name: Resolve Project path
         id: path
         run: |
           PROJECT_PATH="$(resolve_project_path '${{ inputs.project_path }}')"
           log "🔹 Using project path: $PROJECT_PATH"
           echo "value=$PROJECT_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: 👀 Files in workspace
+      - name: 👀 Files in Consumer Project
         working-directory: ${{ steps.path.outputs.value }}
         run: |
           ls_files
